@@ -133,4 +133,103 @@ describe('BridgeService', () => {
       expect(bridgeService.getPendingRequest()).toBeNull();
     });
   });
+
+  describe('Request Claiming', () => {
+    test('should hand a request to one poll only', async () => {
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+
+      expect(bridgeService.getPendingRequest()).toBeTruthy();
+      expect(bridgeService.getPendingRequest()).toBeNull();
+    });
+
+    test('should hand a released request out again', async () => {
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+
+      const claimed = bridgeService.getPendingRequest();
+      bridgeService.releaseRequest(claimed!.requestId);
+
+      expect(bridgeService.getPendingRequest()?.requestId).toBe(claimed!.requestId);
+    });
+  });
+
+  describe('Long Polling', () => {
+    test('should answer a waiting poller as soon as a request is queued', async () => {
+      const waiting = bridgeService.waitForPendingRequest('edit', 15000);
+
+      bridgeService.sendRequest('/api/test', { n: 1 }).catch(() => {});
+
+      const claimed = await waiting;
+      expect(claimed?.request).toEqual({ endpoint: '/api/test', data: { n: 1 } });
+      expect(bridgeService.getWaitingPollerCount()).toBe(0);
+    });
+
+    test('should answer at once when a request is already queued', async () => {
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+
+      const claimed = await bridgeService.waitForPendingRequest('edit', 15000);
+
+      expect(claimed?.request.endpoint).toBe('/api/test');
+    });
+
+    test('should answer null when the hold ends', async () => {
+      const waiting = bridgeService.waitForPendingRequest('edit', 15000);
+
+      jest.advanceTimersByTime(15000);
+
+      expect(await waiting).toBeNull();
+      expect(bridgeService.getWaitingPollerCount()).toBe(0);
+    });
+
+    test('should not hold when the hold is zero', async () => {
+      expect(await bridgeService.waitForPendingRequest('edit', 0)).toBeNull();
+      expect(bridgeService.getWaitingPollerCount()).toBe(0);
+    });
+
+    test('should wake only a poller of the target role', async () => {
+      const editPoll = bridgeService.waitForPendingRequest('edit', 15000);
+      const serverPoll = bridgeService.waitForPendingRequest('server', 15000);
+
+      bridgeService.sendRequest('/api/test', {}, 'server').catch(() => {});
+
+      expect((await serverPoll)?.request.endpoint).toBe('/api/test');
+      jest.advanceTimersByTime(15000);
+      expect(await editPoll).toBeNull();
+    });
+
+    test('should deliver a request to exactly one of two waiting pollers', async () => {
+      const deliveries: string[] = [];
+      const first = bridgeService.waitForPendingRequest('edit', 15000).then(r => r && deliveries.push('first'));
+      const second = bridgeService.waitForPendingRequest('edit', 15000).then(r => r && deliveries.push('second'));
+
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+      await Promise.resolve();
+      jest.advanceTimersByTime(15000);
+      await Promise.all([first, second]);
+
+      expect(deliveries).toEqual(['first']);
+    });
+
+    test('should drop an aborted poller without consuming a request', async () => {
+      const controller = new AbortController();
+      const waiting = bridgeService.waitForPendingRequest('edit', 15000, controller.signal);
+
+      controller.abort();
+
+      expect(await waiting).toBeNull();
+      expect(bridgeService.getWaitingPollerCount()).toBe(0);
+
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+      expect(bridgeService.getPendingRequest()?.request.endpoint).toBe('/api/test');
+    });
+
+    test('should wake a waiting poller when a request is released', async () => {
+      bridgeService.sendRequest('/api/test', {}).catch(() => {});
+      const claimed = bridgeService.getPendingRequest();
+      const waiting = bridgeService.waitForPendingRequest('edit', 15000);
+
+      bridgeService.releaseRequest(claimed!.requestId);
+
+      expect((await waiting)?.requestId).toBe(claimed!.requestId);
+    });
+  });
 });

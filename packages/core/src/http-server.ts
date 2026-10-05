@@ -114,6 +114,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
+  const pollHoldMs = parseInt(process.env.ROBLOX_STUDIO_POLL_HOLD_MS || '15000');
 
   const setMCPServerActive = (active: boolean) => {
     mcpServerActive = active;
@@ -213,7 +214,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   });
 
 
-  app.get('/poll', (req, res) => {
+  app.get('/poll', async (req, res) => {
     const instanceId = req.query.instanceId as string | undefined;
 
     if (instanceId) {
@@ -228,17 +229,37 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       }
     }
 
-    if (!isMCPServerActive()) {
+    const answerMCPInactive = () => {
       res.status(503).json({
         error: 'MCP server not connected',
         pluginConnected: true,
         mcpConnected: false,
         request: null
       });
+    };
+
+    if (!isMCPServerActive()) {
+      answerMCPInactive();
       return;
     }
 
-    const pendingRequest = bridge.getPendingRequest(callerRole);
+    const pollerGone = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) pollerGone.abort();
+    });
+
+    const holdMs = req.query.hold === '0' ? 0 : pollHoldMs;
+    const pendingRequest = await bridge.waitForPendingRequest(callerRole, holdMs, pollerGone.signal);
+
+    if (pollerGone.signal.aborted) {
+      if (pendingRequest) bridge.releaseRequest(pendingRequest.requestId);
+      return;
+    }
+
+    if (instanceId) {
+      bridge.updateInstanceActivity(instanceId);
+    }
+
     if (pendingRequest) {
       res.json({
         request: pendingRequest.request,
@@ -247,6 +268,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         pluginConnected: true,
         proxyInstanceCount: proxyInstances.size
       });
+    } else if (!isMCPServerActive()) {
+      answerMCPInactive();
     } else {
       res.json({
         request: null,

@@ -11,7 +11,6 @@ function createConnection(port: number): Connection {
 		serverUrl: `http://localhost:${port}`,
 		isActive: false,
 		pollInterval: 0.5,
-		lastPoll: 0,
 		consecutiveFailures: 0,
 		maxFailuresBeforeError: 50,
 		lastSuccessfulConnection: 0,
@@ -22,7 +21,8 @@ function createConnection(port: number): Connection {
 		lastMcpOk: false,
 		mcpWaitStartTime: undefined,
 		isPolling: false,
-		heartbeatConnection: undefined,
+		pollLoopGeneration: 0,
+		outstandingResponses: 0,
 	};
 }
 
