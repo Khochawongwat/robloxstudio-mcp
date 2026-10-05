@@ -5,7 +5,6 @@ export interface Connection {
 	serverUrl: string;
 	isActive: boolean;
 	pollInterval: number;
-	lastPoll: number;
 	consecutiveFailures: number;
 	maxFailuresBeforeError: number;
 	lastSuccessfulConnection: number;
@@ -16,7 +15,8 @@ export interface Connection {
 	lastMcpOk: boolean;
 	mcpWaitStartTime?: number;
 	isPolling: boolean;
-	heartbeatConnection?: RBXScriptConnection;
+	pollLoopGeneration: number;
+	outstandingResponses: number;
 }
 
 export interface RequestData {

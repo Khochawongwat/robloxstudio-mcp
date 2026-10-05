@@ -13,9 +13,20 @@ interface PendingRequest {
   data: any;
   target: string;
   timestamp: number;
+  claimed: boolean;
   resolve: (value: any) => void;
   reject: (error: any) => void;
   timeoutId: ReturnType<typeof setTimeout>;
+}
+
+export interface ClaimedRequest {
+  requestId: string;
+  request: { endpoint: string; data: any };
+}
+
+interface PollWaiter {
+  role: string;
+  deliver: (claimed: ClaimedRequest | null) => void;
 }
 
 const STALE_INSTANCE_MS = 30000;
@@ -23,6 +34,7 @@ const STALE_INSTANCE_MS = 30000;
 export class BridgeService {
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private instances: Map<string, PluginInstance> = new Map();
+  private pollWaiters: PollWaiter[] = [];
   private nextClientIndex = 1;
   private requestTimeout = 30000;
 
@@ -99,27 +111,30 @@ export class BridgeService {
         data,
         target,
         timestamp: Date.now(),
+        claimed: false,
         resolve,
         reject,
         timeoutId
       };
 
       this.pendingRequests.set(requestId, request);
+      this.wakePoller(target);
     });
   }
 
-  getPendingRequest(callerRole = 'edit'): { requestId: string; request: { endpoint: string; data: any } } | null {
+  getPendingRequest(callerRole = 'edit'): ClaimedRequest | null {
 
     let oldestRequest: PendingRequest | null = null;
 
     for (const request of this.pendingRequests.values()) {
-      if (request.target !== callerRole) continue;
+      if (request.target !== callerRole || request.claimed) continue;
       if (!oldestRequest || request.timestamp < oldestRequest.timestamp) {
         oldestRequest = request;
       }
     }
 
     if (oldestRequest) {
+      oldestRequest.claimed = true;
       return {
         requestId: oldestRequest.id,
         request: {
@@ -130,6 +145,53 @@ export class BridgeService {
     }
 
     return null;
+  }
+
+  waitForPendingRequest(callerRole: string, holdMs: number, signal?: AbortSignal): Promise<ClaimedRequest | null> {
+    const ready = this.getPendingRequest(callerRole);
+    if (ready || holdMs <= 0 || signal?.aborted) {
+      return Promise.resolve(ready);
+    }
+
+    return new Promise((resolve) => {
+      const giveUp = () => {
+        const index = this.pollWaiters.indexOf(waiter);
+        if (index !== -1) this.pollWaiters.splice(index, 1);
+        waiter.deliver(null);
+      };
+      const holdTimeout = setTimeout(giveUp, holdMs);
+      const waiter: PollWaiter = {
+        role: callerRole,
+        deliver: (claimed) => {
+          clearTimeout(holdTimeout);
+          signal?.removeEventListener('abort', giveUp);
+          resolve(claimed);
+        },
+      };
+      signal?.addEventListener('abort', giveUp, { once: true });
+      this.pollWaiters.push(waiter);
+    });
+  }
+
+  getWaitingPollerCount(): number {
+    return this.pollWaiters.length;
+  }
+
+  releaseRequest(requestId: string) {
+    const request = this.pendingRequests.get(requestId);
+    if (request) {
+      request.claimed = false;
+      this.wakePoller(request.target);
+    }
+  }
+
+  private wakePoller(role: string) {
+    const index = this.pollWaiters.findIndex(w => w.role === role);
+    if (index === -1) return;
+    const claimed = this.getPendingRequest(role);
+    if (!claimed) return;
+    const [waiter] = this.pollWaiters.splice(index, 1);
+    waiter.deliver(claimed);
   }
 
   resolveRequest(requestId: string, response: any) {

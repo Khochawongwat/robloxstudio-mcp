@@ -125,16 +125,22 @@ function getConnectionStatus(connIndex: number): string {
 	return "connecting";
 }
 
-function pollForRequests(connIndex: number) {
+interface PollOutcome {
+	receivedRequest: boolean;
+	canHold: boolean;
+}
+
+function pollForRequests(connIndex: number, hold: boolean): PollOutcome {
+	const outcome: PollOutcome = { receivedRequest: false, canHold: false };
 	const conn = State.getConnection(connIndex);
-	if (!conn || !conn.isActive) return;
-	if (conn.isPolling) return;
+	if (!conn || !conn.isActive) return outcome;
+	if (conn.isPolling) return outcome;
 
 	conn.isPolling = true;
 
 	const [success, result] = pcall(() => {
 		return HttpService.RequestAsync({
-			Url: `${conn.serverUrl}/poll?instanceId=${instanceId}`,
+			Url: `${conn.serverUrl}/poll?instanceId=${instanceId}${hold ? "" : "&hold=0"}`,
 			Method: "GET",
 			Headers: { "Content-Type": "application/json" },
 		});
@@ -154,6 +160,7 @@ function pollForRequests(connIndex: number) {
 		const mcpConnected = data.mcpConnected === true;
 		conn.lastHttpOk = true;
 		conn.lastMcpOk = mcpConnected;
+		outcome.canHold = result.StatusCode === 200 && mcpConnected;
 
 		if (connIndex === State.getActiveTabIndex()) {
 			const el = ui;
@@ -197,6 +204,8 @@ function pollForRequests(connIndex: number) {
 		}
 
 		if (data.request && mcpConnected) {
+			outcome.receivedRequest = true;
+			conn.outstandingResponses += 1;
 			task.spawn(() => {
 				const [ok, response] = pcall(() => processRequest(data.request!));
 				if (ok) {
@@ -204,6 +213,7 @@ function pollForRequests(connIndex: number) {
 				} else {
 					sendResponse(conn, data.requestId!, { error: tostring(response) });
 				}
+				conn.outstandingResponses -= 1;
 			});
 		}
 	} else if (conn.isActive) {
@@ -274,6 +284,29 @@ function pollForRequests(connIndex: number) {
 			}
 		}
 	}
+
+	return outcome;
+}
+
+function startPollLoop(connIndex: number, conn: Connection) {
+	conn.pollLoopGeneration += 1;
+	const generation = conn.pollLoopGeneration;
+
+	task.spawn(() => {
+		let canHold = false;
+		while (conn.isActive && conn.pollLoopGeneration === generation) {
+			const started = tick();
+			const busy = conn.outstandingResponses > 0;
+			const outcome = pollForRequests(connIndex, canHold && !busy);
+			canHold = outcome.canHold;
+			if (outcome.receivedRequest) continue;
+
+			const interval = conn.consecutiveFailures > 5 ? conn.currentRetryDelay : conn.pollInterval;
+			while (tick() - started < interval && !(busy && conn.outstandingResponses === 0)) {
+				task.wait();
+			}
+		}
+	});
 }
 
 
@@ -298,18 +331,9 @@ function activatePlugin(connIndex?: number) {
 	}
 	UI.updateTabDot(idx);
 
-	task.spawn(() => {
-		if (!conn.heartbeatConnection) {
-			conn.heartbeatConnection = RunService.Heartbeat.Connect(() => {
-				const now = tick();
-				const currentInterval = conn.consecutiveFailures > 5 ? conn.currentRetryDelay : conn.pollInterval;
-				if (now - conn.lastPoll > currentInterval) {
-					conn.lastPoll = now;
-					pollForRequests(idx);
-				}
-			});
-		}
+	startPollLoop(idx, conn);
 
+	task.spawn(() => {
 		const [readyOk, readyResult] = pcall(() => {
 			return HttpService.RequestAsync({
 				Url: `${conn.serverUrl}/ready`,
@@ -347,10 +371,7 @@ function deactivatePlugin(connIndex?: number) {
 		});
 	});
 
-	if (conn.heartbeatConnection) {
-		conn.heartbeatConnection.Disconnect();
-		conn.heartbeatConnection = undefined;
-	}
+	conn.pollLoopGeneration += 1;
 
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;

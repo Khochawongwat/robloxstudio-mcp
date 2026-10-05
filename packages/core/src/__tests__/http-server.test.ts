@@ -10,6 +10,7 @@ describe('HTTP Server', () => {
   let tools: RobloxStudioTools;
 
   beforeEach(() => {
+    process.env.ROBLOX_STUDIO_POLL_HOLD_MS = '50';
     bridge = new BridgeService();
     tools = new RobloxStudioTools(bridge);
     app = createHttpServer(tools, bridge);
@@ -133,6 +134,60 @@ describe('HTTP Server', () => {
         mcpConnected: true,
         pluginConnected: true
       });
+    });
+
+    test('should hold an empty poll until a request is queued', async () => {
+      process.env.ROBLOX_STUDIO_POLL_HOLD_MS = '10000';
+      app = createHttpServer(tools, bridge);
+      await request(app).post('/ready').send({ instanceId: 'test-1', role: 'edit' }).expect(200);
+      app.setMCPServerActive(true);
+
+      const started = Date.now();
+      const poll = request(app).get('/poll?instanceId=test-1').then(r => r);
+      setTimeout(() => bridge.sendRequest('/api/test', { held: true }).catch(() => {}), 100);
+
+      const response = await poll;
+      expect(response.status).toBe(200);
+      expect(response.body.request).toEqual({ endpoint: '/api/test', data: { held: true } });
+      expect(Date.now() - started).toBeLessThan(2000);
+    });
+
+    test('should answer null when the hold ends', async () => {
+      await request(app).post('/ready').send({ instanceId: 'test-1', role: 'edit' }).expect(200);
+      app.setMCPServerActive(true);
+
+      const started = Date.now();
+      const response = await request(app).get('/poll?instanceId=test-1').expect(200);
+
+      expect(response.body.request).toBeNull();
+      expect(Date.now() - started).toBeGreaterThanOrEqual(45);
+    });
+
+    test('should answer at once when the poll asks not to be held', async () => {
+      process.env.ROBLOX_STUDIO_POLL_HOLD_MS = '10000';
+      app = createHttpServer(tools, bridge);
+      await request(app).post('/ready').send({ instanceId: 'test-1', role: 'edit' }).expect(200);
+      app.setMCPServerActive(true);
+
+      const started = Date.now();
+      const response = await request(app).get('/poll?instanceId=test-1&hold=0').expect(200);
+
+      expect(response.body.request).toBeNull();
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    test('should drop the waiter and keep the request when the poller disconnects', async () => {
+      process.env.ROBLOX_STUDIO_POLL_HOLD_MS = '10000';
+      app = createHttpServer(tools, bridge);
+      await request(app).post('/ready').send({ instanceId: 'test-1', role: 'edit' }).expect(200);
+      app.setMCPServerActive(true);
+
+      await expect(request(app).get('/poll?instanceId=test-1').timeout(100)).rejects.toThrow();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(bridge.getWaitingPollerCount()).toBe(0);
+
+      bridge.sendRequest('/api/test', {}).catch(() => {});
+      expect(bridge.getPendingRequest()?.request.endpoint).toBe('/api/test');
     });
   });
 

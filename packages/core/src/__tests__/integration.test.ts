@@ -10,6 +10,7 @@ describe('Integration Tests', () => {
   let tools: RobloxStudioTools;
 
   beforeEach(() => {
+    process.env.ROBLOX_STUDIO_POLL_HOLD_MS = '50';
     bridge = new BridgeService();
     tools = new RobloxStudioTools(bridge);
     app = createHttpServer(tools, bridge);
